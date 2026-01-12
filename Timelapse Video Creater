@@ -1,0 +1,163 @@
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from PIL import Image
+
+# ----------------------------
+# Helpers
+# ----------------------------
+
+def get_images(folder):
+    exts = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
+    return [p for p in Path(folder).iterdir() if p.suffix.lower() in exts]
+
+def sort_images(images, mode):
+    if mode == "1":
+        return sorted(images, key=lambda x: x.name.lower())
+    elif mode == "2":
+        return sorted(images, key=lambda x: x.stat().st_mtime)
+    else:
+        raise ValueError("Invalid sort mode")
+
+def get_smallest_resolution(images):
+    min_w, min_h = None, None
+    for img_path in images:
+        with Image.open(img_path) as img:
+            w, h = img.size
+            if min_w is None or (w * h < min_w * min_h):
+                min_w, min_h = w, h
+    return min_w, min_h
+
+def choose_framerate():
+    options = {
+        "1": 24,
+        "2": 25,
+        "3": 30,
+        "4": 50,
+        "5": 60
+    }
+
+    print("\nChoose output frame rate:")
+    print("1) 24 fps")
+    print("2) 25 fps")
+    print("3) 30 fps")
+    print("4) 50 fps")
+    print("5) 60 fps")
+
+    return options.get(input("Select option [1-5]: ").strip(), 30)
+
+def choose_codec():
+    print("\nChoose output codec:")
+    print("1) MJPEG (CPU, very large files)")
+    print("2) H.264 (NVENC)")
+    print("3) H.265 / HEVC (NVENC)")
+
+    choice = input("Select option [1-3]: ").strip()
+
+    if choice == "1":
+        return {
+            "codec": "mjpeg",
+            "label": "mjpeg",
+            "extra": ["-q:v", "3"],
+            "ext": "avi"
+        }
+    elif choice == "2":
+        return {
+            "codec": "h264_nvenc",
+            "label": "h264",
+            "extra": ["-preset", "p6", "-rc", "vbr", "-cq", "19"],
+            "ext": "mp4"
+        }
+    elif choice == "3":
+        return {
+            "codec": "hevc_nvenc",
+            "label": "h265",
+            "extra": ["-preset", "p6", "-rc", "vbr", "-cq", "19"],
+            "ext": "mp4"
+        }
+    else:
+        print("Invalid choice, defaulting to H.265")
+        return {
+            "codec": "hevc_nvenc",
+            "extra": ["-preset", "p6", "-rc", "vbr", "-cq", "19"],
+            "ext": "mp4"
+        }
+
+# ----------------------------
+# Main
+# ----------------------------
+
+def main():
+    print("=== Timelapse Creator (MJPEG / H.264 / H.265) ===\n")
+
+    input_folder = input("Input image folder: ").strip()
+    if not os.path.isdir(input_folder):
+        print("Invalid folder")
+        return
+
+    images = get_images(input_folder)
+    if not images:
+        print("No images found")
+        return
+
+    print("\nSort images by:")
+    print("1) Alphabetical")
+    print("2) Date modified")
+    sort_mode = input("Choose [1/2]: ").strip()
+
+    images = sort_images(images, sort_mode)
+
+    pics_per_sec = float(input("\nPictures per second: ").strip())
+    frame_rate = choose_framerate()
+    codec_cfg = choose_codec()
+
+    output_folder = input("\nOutput folder: ").strip()
+    os.makedirs(output_folder, exist_ok=True)
+
+    base_name = input("Output file name (no extension): ").strip()
+
+    speed_tag = f"{pics_per_sec:g}s-{frame_rate}fps"
+    final_name = f"{base_name}_{codec_cfg['label']}_{speed_tag}.{codec_cfg['ext']}"
+
+    output_path = os.path.join(output_folder, final_name)
+
+    print("\nDetecting smallest resolution...")
+    width, height = get_smallest_resolution(images)
+    print(f"Using {width}x{height}")
+
+    # Create concat list
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        list_file = f.name
+        duration = 1 / pics_per_sec
+        for img in images:
+            f.write(f"file '{img.as_posix()}'\n")
+            f.write(f"duration {duration}\n")
+        f.write(f"file '{images[-1].as_posix()}'\n")
+
+    print("\nRendering timelapse...")
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", list_file,
+        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+        "-r", str(frame_rate),
+        "-c:v", codec_cfg["codec"],
+        *codec_cfg["extra"],
+        "-pix_fmt", "yuv420p",
+        output_path
+    ]
+
+    subprocess.run(ffmpeg_cmd)
+
+    os.unlink(list_file)
+
+    print("\n✅ Timelapse created:")
+    print(output_path)
+
+if __name__ == "__main__":
+    main()
